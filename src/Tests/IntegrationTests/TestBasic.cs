@@ -19,6 +19,8 @@ using NATS.Client;
 using System.Diagnostics;
 using Xunit;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using Xunit.Abstractions;
 
 
 namespace IntegrationTests
@@ -29,8 +31,14 @@ namespace IntegrationTests
     [Collection(DefaultSuiteContext.CollectionKey)]
     public class TestBasic : TestSuite<DefaultSuiteContext>
     {
-        public TestBasic(DefaultSuiteContext context) : base(context) { }
+        // Resolution on Windows is 15.6 iirc, Linux should be better but is > 0
+        private const int TIMER_RESOLUTION = 16;
 
+        public TestBasic(ITestOutputHelper outputHelper, DefaultSuiteContext context) : base(context)
+        {
+            _outputHelper = outputHelper;
+        }
+        
         [Fact]
         public void TestConnectedServer()
         {
@@ -200,6 +208,7 @@ namespace IntegrationTests
         readonly object mu = new Object();
         IAsyncSubscription asyncSub = null;
         Boolean received = false;
+        private readonly ITestOutputHelper _outputHelper;
 
         [Fact]
         public void TestAsyncSubscribe()
@@ -649,7 +658,7 @@ namespace IntegrationTests
             }
         }
 
-        private async void testRequestAsync(bool useOldRequestStyle, bool useMsgAPI)
+        private async Task testRequestAsync(bool useOldRequestStyle, bool useMsgAPI)
         {
             using (NATSServer.CreateFastAndVerify())
             {
@@ -661,23 +670,29 @@ namespace IntegrationTests
                     byte[] response = Encoding.UTF8.GetBytes("I will help you.");
                     using (c.SubscribeAsync("foo", (obj, args) => args.Message.Respond(response)))
                     {
-                        var tasks = new List<Task>();
+                        var cts = new CancellationTokenSource(10_000);
+                        var tasks = new List<Task<Msg>>();
                         for (int i = 0; i < 100; i++)
                         {
                             if (useMsgAPI)
                             {
-                                tasks.Add(c.RequestAsync(new Msg("foo"), 10000));
+                                tasks.Add(c.RequestAsync(new Msg("foo"), cts.Token));
                             }
                             else
                             {
-                                tasks.Add(c.RequestAsync("foo", null, 10000));
+                                tasks.Add(c.RequestAsync("foo", null, cts.Token));
                             }
                         }
 
-                        foreach (Task<Msg> t in tasks)
+                        foreach (var t in Interleaved(tasks))
                         {
-                            Msg m = await t;
-                            Assert.True(compare(m.Data, response), "Response isn't valid");
+                            Msg m = await await t;
+
+                            if (!compare(m.Data, response))
+                            {
+                                cts.Cancel();
+                                Assert.True(false, "Response isn't valid");
+                            }
                         }
                     }
 
@@ -686,7 +701,7 @@ namespace IntegrationTests
             }
         }
 
-        private async void testRequestAsyncWithOffsets(bool useOldRequestStyle)
+        private async Task testRequestAsyncWithOffsets(bool useOldRequestStyle)
         {
             using (NATSServer.CreateFastAndVerify())
             {
@@ -707,16 +722,21 @@ namespace IntegrationTests
 
                     using (IAsyncSubscription s = c.SubscribeAsync("foo", eh))
                     {
-                        var tasks = new List<Task>();
+                        var tasks = new List<Task<Msg>>();
+                        var cts = new CancellationTokenSource(1_000);
                         for (int i = 0; i < 100; i++)
                         {
-                            tasks.Add(c.RequestAsync("foo", request, 5, 5, 1000));
+                            tasks.Add(c.RequestAsync("foo", request, 5, 5, cts.Token));
                         }
 
-                        foreach (Task<Msg> t in tasks)
+                        foreach (var t in Interleaved(tasks))
                         {
-                            Msg m = await t;
-                            Assert.True(compare(response, 11, m.Data, 5), "Response isn't valid");
+                            Msg m = await await t;
+                            if (!compare(response, 11, m.Data, 5))
+                            {
+                                cts.Cancel();
+                                Assert.True(false, "Response isn't valid");
+                            }
                         }
                     }
 
@@ -726,42 +746,42 @@ namespace IntegrationTests
         }
 
         [Fact]
-        public void TestRequestAsync()
+        public async Task TestRequestAsync()
         {
-            testRequestAsync(useOldRequestStyle: false, useMsgAPI: false);
+            await testRequestAsync(useOldRequestStyle: false, useMsgAPI: false);
         }
 
         [Fact]
-        public void TestRequestAsync_OldRequestStyle()
+        public async Task TestRequestAsync_OldRequestStyle()
         {
-            testRequestAsync(useOldRequestStyle: true, useMsgAPI: false);
+            await testRequestAsync(useOldRequestStyle: true, useMsgAPI: false);
         }
 
         [Fact]
-        public void TestRequestAsyncMsg()
+        public async Task TestRequestAsyncMsg()
         {
-            testRequestAsync(useOldRequestStyle: false, useMsgAPI: true);
+            await testRequestAsync(useOldRequestStyle: false, useMsgAPI: true);
         }
 
         [Fact]
-        public void TestRequestAsyncMsg_OldRequestStyle()
+        public async Task TestRequestAsyncMsg_OldRequestStyle()
         {
-            testRequestAsync(useOldRequestStyle: true, useMsgAPI: true);
+            await testRequestAsync(useOldRequestStyle: true, useMsgAPI: true);
         }
 
         [Fact]
-        public void TestRequestAsyncWithOffsets()
+        public async Task TestRequestAsyncWithOffsets()
         {
-            testRequestAsyncWithOffsets(useOldRequestStyle: false);
+            await testRequestAsyncWithOffsets(useOldRequestStyle: false);
         }
 
         [Fact]
-        public void TestRequestAsyncWithOffsets_OldRequestStyle()
+        public async Task TestRequestAsyncWithOffsets_OldRequestStyle()
         {
-            testRequestAsyncWithOffsets(useOldRequestStyle: true);
+            await testRequestAsyncWithOffsets(useOldRequestStyle: true);
         }
 
-        private async void testRequestAsyncCancellation(bool useOldRequestStyle, bool useMsgAPI)
+        private async Task testRequestAsyncCancellation(bool useOldRequestStyle, bool useMsgAPI)
         {
             using (NATSServer.CreateFastAndVerify())
             {
@@ -783,29 +803,34 @@ namespace IntegrationTests
                     };
 
                     // test cancellation success.
-                    var miscToken = new CancellationTokenSource().Token;
                     using (IAsyncSubscription s = c.SubscribeAsync("foo", eh))
                     {
-                        var tasks = new List<Task>();
+                        var tasks = new List<Task<Msg>>();
+                        var cancellationTokenSource = new CancellationTokenSource();
                         for (int i = 0; i < 1000; i++)
                         {
                             if (useMsgAPI)
                             {
-                                tasks.Add(c.RequestAsync(new Msg("foo"), miscToken));
+                                tasks.Add(c.RequestAsync(new Msg("foo"), cancellationTokenSource.Token));
                             }
                             else
                             {
-                                tasks.Add(c.RequestAsync("foo", null, miscToken));
+                                tasks.Add(c.RequestAsync("foo", null, cancellationTokenSource.Token));
                             }
                         }
 
-                        foreach (Task<Msg> t in tasks)
+                        foreach (var t in Interleaved(tasks))
                         {
-                            Msg m = await t;
-                            Assert.True(compare(m.Data, response), "Response isn't valid");
+                            Msg m = await await t;
+                            if (!compare(m.Data, response))
+                            {
+                                cancellationTokenSource.Cancel();
+                                Assert.True(false, "Response isn't valid");
+                            }
                         }
                     }
 
+                    var miscToken = new CancellationTokenSource().Token;
                     // test timeout, make sure we are somewhat close (for testing on stressed systems).
                     Stopwatch sw = Stopwatch.StartNew();
                     await Assert.ThrowsAsync<NATSNoRespondersException>(() => { return c.RequestAsync("no-responder", null, 10000, miscToken); });
@@ -817,7 +842,7 @@ namespace IntegrationTests
                     c.SubscribeSync("timeout");
                     await Assert.ThrowsAsync<NATSTimeoutException>(() => { return c.RequestAsync("timeout", null, 500, miscToken); });
                     sw.Stop();
-                    Assert.True(sw.Elapsed.TotalMilliseconds > 500, "Elapsed millis are: " + sw.ElapsedMilliseconds);
+                    Assert.True(sw.Elapsed.TotalMilliseconds > 500 - TIMER_RESOLUTION, "Elapsed millis are: " + sw.ElapsedMilliseconds);
 
                     // test early cancellation
                     var cts = new CancellationTokenSource();
@@ -850,36 +875,35 @@ namespace IntegrationTests
         }
 
         [Fact]
-        public void TestRequestAsyncCancellation()
+        public async Task TestRequestAsyncCancellation()
         {
-            testRequestAsyncCancellation(useOldRequestStyle: false, useMsgAPI: false);
-            testRequestAsyncCancellation(useOldRequestStyle: false, useMsgAPI: true);
+            var request1 = testRequestAsyncCancellation(useOldRequestStyle: false, useMsgAPI: false);
+            var request2 = testRequestAsyncCancellation(useOldRequestStyle: false, useMsgAPI: true);
+            await Task.WhenAll(request1, request2);
         }
 
         [Fact]
-        public void TestRequestAsyncMsgCancellation()
+        public async Task TestRequestAsyncMsgCancellation()
         {
-            testRequestAsyncCancellation(useOldRequestStyle: false, useMsgAPI: true);
+            await testRequestAsyncCancellation(useOldRequestStyle: false, useMsgAPI: true);
         }
 
         [Fact]
-        public void TestRequestAsyncCancellation_OldRequestStyle()
+        public async Task TestRequestAsyncCancellation_OldRequestStyle()
         {
-            testRequestAsyncCancellation(useOldRequestStyle: true, useMsgAPI: false);
+            await testRequestAsyncCancellation(useOldRequestStyle: true, useMsgAPI: false);
         }
 
         [Fact]
-        public void TestRequestAsyncMsgCancellation_OldRequestStyle()
+        public async Task TestRequestAsyncMsgCancellation_OldRequestStyle()
         {
-            testRequestAsyncCancellation(useOldRequestStyle: true, useMsgAPI: true);
+            await testRequestAsyncCancellation(useOldRequestStyle: true, useMsgAPI: true);
         }
 
-        private async void testRequestAsyncTimeout(bool useOldRequestStyle, bool useMsgAPI)
+        private async Task testRequestAsyncTimeout(bool useOldRequestStyle, bool useMsgAPI)
         {
             using (var server = NATSServer.CreateFastAndVerify())
             {
-                var sw = new Stopwatch();
-
                 var opts = Context.GetTestOptionsWithDefaultTimeout();
                 opts.AllowReconnect = false;
                 opts.UseOldRequestStyle = useOldRequestStyle;
@@ -888,7 +912,6 @@ namespace IntegrationTests
                     // success condition
                     using (var sub = conn.SubscribeAsync("foo", (obj, args) => { args.Message.Respond(new byte[0]); }))
                     {
-                        sw.Start();
                         if (useMsgAPI)
                         {
                             await conn.RequestAsync(new Msg("foo", new byte[0]), 5000);
@@ -897,33 +920,20 @@ namespace IntegrationTests
                         {
                             await conn.RequestAsync("foo", new byte[0], 5000);
                         }
-                        sw.Stop();
-                        Assert.True(sw.ElapsedMilliseconds < 5000, "Unexpected timeout behavior");
                         sub.Unsubscribe();
                     }
 
                     // valid connection, but no response
                     conn.SubscribeSync("test");
-                    sw.Restart();
                     await Assert.ThrowsAsync<NATSTimeoutException>(() => { return conn.RequestAsync("test", new byte[0], 500); });
-                    sw.Stop();
-                    long elapsed = sw.ElapsedMilliseconds;
-                    Assert.True(elapsed >= 500, string.Format("Unexpected value (should be > 500): {0}", elapsed));
-                    long variance = elapsed - 500;
-#if DEBUG
-                    Assert.True(variance < 250, string.Format("Invalid timeout variance: {0}", variance));
-#else
-                Assert.True(variance < 100, string.Format("Invalid timeout variance: {0}", variance));
-#endif
+
                     // Test an invalid connection
 
                     // no responders
-                    sw.Restart();
                     await Assert.ThrowsAsync<NATSNoRespondersException>(() => { return conn.RequestAsync("nosubs", new byte[0], 10000); });
-                    sw.Stop();
-                    Assert.True(sw.ElapsedMilliseconds < 9000);
 
                     server.Shutdown();
+                    conn.Close();
                     Thread.Sleep(500);
                     await Assert.ThrowsAsync<NATSConnectionClosedException>(() => { return conn.RequestAsync("test", new byte[0], 1000); });
                 }
@@ -931,27 +941,27 @@ namespace IntegrationTests
         }
 
         [Fact]
-        public void TestRequestAsyncTimeout()
+        public async Task TestRequestAsyncTimeout()
         {
-            testRequestAsyncTimeout(useOldRequestStyle: false, useMsgAPI: false);
+            await testRequestAsyncTimeout(useOldRequestStyle: false, useMsgAPI: false);
         }
 
         [Fact]
-        public void TestRequestAsyncMsgTimeout()
+        public async Task TestRequestAsyncMsgTimeout()
         {
-            testRequestAsyncTimeout(useOldRequestStyle: false, useMsgAPI: true);
+            await testRequestAsyncTimeout(useOldRequestStyle: false, useMsgAPI: true);
         }
 
         [Fact]
-        public void TestRequestAsyncTimeout_OldRequestStyle()
+        public async Task TestRequestAsyncTimeout_OldRequestStyle()
         {
-            testRequestAsyncTimeout(useOldRequestStyle: true, useMsgAPI: false);
+            await testRequestAsyncTimeout(useOldRequestStyle: true, useMsgAPI: false);
         }
 
         [Fact]
-        public void TestRequestAsyncMsgTimeout_OldRequestStyle()
+        public async Task TestRequestAsyncMsgTimeout_OldRequestStyle()
         {
-            testRequestAsyncTimeout(useOldRequestStyle: true, useMsgAPI: true);
+            await testRequestAsyncTimeout(useOldRequestStyle: true, useMsgAPI: true);
         }
 
         private void TestRequestMsgWithHeader(bool useOldStyle)
@@ -1054,6 +1064,7 @@ namespace IntegrationTests
 
         class TestReplier
         {
+            private byte[] response = Encoding.UTF8.GetBytes("reply");
             string replySubject;
             string id;
             int delay;
@@ -1077,7 +1088,7 @@ namespace IntegrationTests
                 // delay the response to simulate a heavy workload and introduce
                 // variability
                 Thread.Sleep(r.Next((delay / 5), delay));
-                c.Publish(replySubject, Encoding.UTF8.GetBytes("reply"));
+                c.Publish(replySubject, response);
                 c.Flush();
             }
 
@@ -1086,7 +1097,7 @@ namespace IntegrationTests
                 // delay the response to simulate a heavy workload and introduce
                 // variability
                 await Task.Delay(r.Next((delay / 5), delay));
-                c.Publish(replySubject, Encoding.UTF8.GetBytes("reply"));
+                c.Publish(replySubject, response);
                 c.Flush();
             }
         }
@@ -1113,9 +1124,7 @@ namespace IntegrationTests
             int TEST_COUNT = 300;
 
             Stopwatch sw = new Stopwatch();
-            byte[] response = Encoding.UTF8.GetBytes("reply");
 
-            ThreadPool.SetMinThreads(300, 300);
             using (NATSServer.CreateFastAndVerify())
             {
                 Options opts = Context.GetTestOptions();
@@ -1139,16 +1148,18 @@ namespace IntegrationTests
 
                         // use lower level threads over tasks here for predictibility
                         Thread[] threads = new Thread[TEST_COUNT];
+                        int[] sleepDurations = new int[TEST_COUNT];
                         Random r = new Random();
 
                         for (int i = 0; i < TEST_COUNT; i++)
                         {
-                            threads[i] = new Thread((() =>
+                            sleepDurations[i] = r.Next(100, 500);
+                            threads[i] = new Thread(sleepDuration =>
                             {
                                 // randomly delay for a bit to test potential timing issues.
-                                Thread.Sleep(r.Next(100, 500));
+                                Thread.Sleep((int)sleepDuration);
                                 c2.Request("foo", null, MAX_DELAY * 2);
-                            }));
+                            });
                         }
 
                         // sleep for one second to allow the threads to initialize.
@@ -1159,7 +1170,7 @@ namespace IntegrationTests
                         // start all of the threads at the same time.
                         for (int i = 0; i < TEST_COUNT; i++)
                         {
-                            threads[i].Start();
+                            threads[i].Start(sleepDurations[i]);
                         }
 
                         // wait for every thread to stop.
@@ -1171,7 +1182,7 @@ namespace IntegrationTests
                         sw.Stop();
 
                         // check that we didn't process the requests consecutively.
-                        Assert.True(sw.ElapsedMilliseconds < (MAX_DELAY * 2));
+                        Assert.InRange(sw.ElapsedMilliseconds, 0, MAX_DELAY * 2);
                     }
                 }
             }
@@ -1207,7 +1218,6 @@ namespace IntegrationTests
             ThreadPool.SetMinThreads(300, 300);
 
             Stopwatch sw = new Stopwatch();
-            byte[] response = Encoding.UTF8.GetBytes("reply");
 
             using (NATSServer.CreateFastAndVerify())
             {
@@ -1773,15 +1783,13 @@ namespace IntegrationTests
                     evDS.WaitOne(5000);
 
                     LinkedList<string> discoveredServers = new LinkedList<string>(c.DiscoveredServers);
-                    Assert.True(discoveredServers.Count == 1);
+                    _outputHelper.WriteLine($"Discovered: {string.Join(",", discoveredServers)}");
+                    Assert.Single(discoveredServers);
 
                     string expectedServer = $"nats://127.0.0.1:{Context.Server3.Port}";
                     if (!discoveredServers.Contains(expectedServer))
                     {
-                        foreach (string s in discoveredServers)
-                        {
-                            Console.WriteLine("\tDiscovered server:" + expectedServer);
-                        }
+                        _outputHelper.WriteLine($"Expected server: {expectedServer}, discovered: {string.Join(",", discoveredServers)}");
                         Assert.True(false, "Discovered servers does not contain " + expectedServer);
                     }
                     evDS.Reset();
@@ -1801,17 +1809,18 @@ namespace IntegrationTests
                         //  "nats://127.0.0.1:4224"]
                         //
                         discoveredServers = new LinkedList<string>(c.DiscoveredServers);
-                        Assert.True(discoveredServers.Count == 2);
+                        _outputHelper.WriteLine($"Discovered: {string.Join(",", discoveredServers)}");
+                        Assert.Equal(2, discoveredServers.Count);
                         Assert.DoesNotContain($"nats://127.0.0.1:{Context.Server2.Port}", discoveredServers);
                         Assert.Contains($"nats://127.0.0.1:{Context.Server3.Port}", discoveredServers);
                         Assert.Contains($"nats://127.0.0.1:{Context.Server4.Port}", discoveredServers);
 
                         // shutdown server 1 and wait for reconnect.
                         s1.Shutdown();
-                        Assert.True(evRC.WaitOne(10000));
+                        Assert.True(evRC.WaitOne(10000), "evRC timeout");
                         // Make sure we did NOT delete our expclitly configured server.
                         LinkedList<string> servers = new LinkedList<string>(c.Servers);
-                        Assert.True(servers.Count == 3); // explicit server is still there.
+                        Assert.Equal(3, servers.Count); // explicit server is still there.
                         Assert.Contains($"nats://127.0.0.1:{Context.Server1.Port}", servers);
                     }
 
@@ -2096,6 +2105,32 @@ namespace IntegrationTests
                 m.Header = null;
                 c.Publish(m);
             }
+        }
+        
+        // Taken from https://devblogs.microsoft.com/pfxteam/processing-tasks-as-they-complete/
+        private static Task<Task<T>> [] Interleaved<T>(List<Task<T>> tasks)
+        {
+            var inputTasks = tasks;
+
+            var buckets = new TaskCompletionSource<Task<T>>[inputTasks.Count];
+            var results = new Task<Task<T>>[buckets.Length];
+            for (int i = 0; i < buckets.Length; i++) 
+            {
+                buckets[i] = new TaskCompletionSource<Task<T>>();
+                results[i] = buckets[i].Task;
+            }
+
+            int nextTaskIndex = -1;
+            Action<Task<T>> continuation = completed =>
+            {
+                var bucket = buckets[Interlocked.Increment(ref nextTaskIndex)];
+                bucket.TrySetResult(completed);
+            };
+
+            foreach (var inputTask in inputTasks)
+                inputTask.ContinueWith(continuation, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
+            return results;
         }
 
     } // class

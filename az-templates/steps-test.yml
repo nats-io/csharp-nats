@@ -1,0 +1,91 @@
+parameters:
+- name: testProject
+  type: string
+  values:
+  - UnitTests
+  - IntegrationTests
+- name: mayFailOn # Agent.OS: Linux, Windows_NT, Darwin
+  type: string
+  default: ''
+- name: preTestSteps
+  type: stepList
+  default: []
+
+steps:
+# Just create .git, https://codecov.io/bash appears to depend on it
+- checkout: self
+  fetchDepth: 3
+
+# Remove cloned source, not needed
+- bash: rm -rf ./*
+  displayName: Remove sources
+
+- ${{ parameters.preTestSteps }}
+
+- task: DownloadPipelineArtifact@2
+  displayName: Download ${{ parameters.testProject }} binaries
+  inputs:
+    targetpath: ./
+    patterns: |
+      src/*
+      src/NATS.Client/**/*
+      src/Tests/${{ parameters.testProject }}/**/*
+    artifactname: binaries
+
+# We need to restore for coverlet.msbuild which isn't copied to the bin directory but only to .nuget
+- script: >-
+    dotnet restore
+    src/Tests/${{ parameters.testProject }}
+    --no-dependencies
+  displayName: Restore ${{ parameters.testProject }}
+
+# continueOnError cannot be set dynamically due to Azure Devops limitations
+# Duplicate the task and use a condition to switch between a version w/ and w/o continueOnError as a workaround
+# https://developercommunityapi.westus.cloudapp.azure.com/idea/782159/yaml-pipeline-continueonerror-cant-accept-a-variab.html
+- script: >-
+    dotnet test
+    src/Tests/${{ parameters.testProject }}
+    --configuration Release
+    --no-build
+    --framework $(targetFrameworkMoniker)
+    --logger trx
+    --results-directory ./results
+    -p:CollectCoverage=true
+    -p:CoverletOutputFormat=cobertura
+    -p:CoverletOutput="../../../results/coverage.xml"
+    --
+    RunConfiguration.DisableAppDomain=true
+  displayName: Run ${{ parameters.testProject }}
+  condition: and(succeeded(), ne('${{ parameters.mayFailOn }}', variables['Agent.OS']))
+
+- script: >-
+    dotnet test
+    src/Tests/${{ parameters.testProject }}
+    --configuration Release
+    --no-build
+    --framework $(targetFrameworkMoniker)
+    --logger trx
+    --results-directory ./results
+    -p:CollectCoverage=true
+    -p:CoverletOutputFormat=cobertura
+    -p:CoverletOutput="../../../results/coverage.xml"
+    --
+    RunConfiguration.DisableAppDomain=true
+  displayName: Run ${{ parameters.testProject }} (continue on error)
+  condition: and(succeeded(), eq('${{ parameters.mayFailOn }}', variables['Agent.OS']))
+  continueOnError: true
+
+- task: PublishTestResults@2
+  displayName: Publish ${{ parameters.testProject }} results
+  condition: always()
+  inputs:
+    testResultsFormat: VSTest
+    testResultsFiles: '**/*.trx'
+    testRunTitle: ${{ parameters.testProject }} $(imageName) $(targetFrameworkMoniker)
+
+- bash: |
+    # Upload coverage
+    cd ./results
+    bash <(curl https://codecov.io/bash) -F ${{ parameters.testProject }} -F $(Agent.OS)-$(targetFrameworkMoniker)
+  displayName: Publish ${{ parameters.testProject }} coverage
+  condition: and(succeeded(), ne('$(targetFrameworkMoniker)', 'net46')) # Coverage collection isn't working for net46

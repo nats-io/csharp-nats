@@ -12,8 +12,17 @@
     <PackageReleaseNotes>https://github.com/nats-io/nats.net/releases</PackageReleaseNotes>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageTags>CNCF NATS Messaging Cloud Publish Subscribe PubSub</PackageTags>
-    <DebugType>pdbonly</DebugType>
+    <Version>0.0.0</Version>
+    <Company>CNCF</Company>
+    <Authors>The NATS Authors</Authors>
+    <Copyright>Copyright © The NATS Authors 2016-$([System.DateTime]::Now.ToString(yyyy))</Copyright>
+    <RepositoryUrl>https://github.com/nats-io/nats.net</RepositoryUrl>
+    <RepositoryType>Git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <DebugType>portable</DebugType>
     <DebugSymbols>true</DebugSymbols>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <PropertyGroup Condition="$(Configuration) == 'Release'">
@@ -38,6 +47,28 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.0.0" PrivateAssets="All"/>
     <PackageReference Include="System.Collections.Specialized" Version="4.3.0" />
   </ItemGroup>
+
+  <!--
+    Use deterministic build when running on Azure Devops
+  -->
+  <PropertyGroup Condition="$(SYSTEM_TEAMFOUNDATIONSERVERURI) != ''">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+  </PropertyGroup>
+
+  <!--
+    Fix coverage for deterministic builds.
+  -->
+  <Target Name="CoverletGetPathMap"
+          DependsOnTargets="InitializeSourceRootMappedPaths"
+          Returns="@(_LocalTopLevelSourceRoot)"
+          Condition="'$(DeterministicSourcePaths)' == 'true'">
+    <ItemGroup>
+      <_LocalTopLevelSourceRoot Include="@(SourceRoot)" Condition="'%(SourceRoot.NestedRoot)' == ''"/>
+    </ItemGroup>
+  </Target>
+
 </Project>

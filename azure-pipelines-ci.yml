@@ -1,9 +1,20 @@
 name: $(SemVer)
 
+# Build Matrix
+# OS/TFM:                       Windows_NT, Linux, Darwin
+# netstandard1.6 + net46            x
+# netstandard1.6                             (x)     (x)
+
+# Test Matrix
+# OS/Runtime:   Windows_NT, Linux, Darwin
+# net46             x
+# netcoreapp3.1     x         x      x
+
 variables:
   BuildRev: $[counter(format('{0:yyyyMMdd}', pipeline.startTime), 1)]
   SemVer: $[format('{0:yyyy}.{0:MM}.{0:dd}-pre{1}', pipeline.startTime, variables.BuildRev)]
-  InfoVer: $(Build.SourceVersion)
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_NOLOGO: true
 
 trigger:
   batch: true
@@ -17,8 +28,6 @@ pr:
     include:
     - master
 
-pool:
-  vmImage: windows-2019
-
 stages:
 - template: az-templates/stage-build.yml
+- template: az-templates/stage-test.yml

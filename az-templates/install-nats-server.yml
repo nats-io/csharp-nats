@@ -1,0 +1,13 @@
+steps:
+- task: Go@0
+  displayName: go get github.com/nats-io/nats-server
+  inputs:
+    arguments: github.com/nats-io/nats-server
+
+- powershell: |
+    Write-Host "GOBIN: $(GOBIN)"
+    $resolvedGOBIN = Resolve-Path $(GOBIN) | Select -Expand Path
+    Write-Host "Resolved form: $resolvedGOBIN"
+    Write-Host "##vso[task.prependpath]$resolvedGOBIN"
+  displayName: Include nats-server in path
+
