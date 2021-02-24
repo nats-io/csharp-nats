@@ -1,4 +1,4 @@
-﻿// Copyright 2015-2018 The NATS Authors
+// Copyright 2015-2018 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -12,6 +12,8 @@
 // limitations under the License.
 
 using System;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace NATS.Client
 {
@@ -20,15 +22,11 @@ namespace NATS.Client
     /// to <see cref="NextMessage()"/> and <see cref="NextMessage(int)"/>. This class should
     /// not be used directly.
     /// </summary>
-    public sealed class SyncSubscription : Subscription, ISyncSubscription, ISubscription 
+    public sealed class SyncSubscription : Subscription, ISyncSubscription, ISubscription
     {
-        internal SyncSubscription(Connection conn, string subject, string queue)
-            : base(conn, subject, queue)
+        internal SyncSubscription(Connection conn, long subscriptionId, string subject, string queue)
+            : base(conn, subscriptionId, subject, queue)
         {
-            mch = new Channel<Msg>()
-            {
-                Name = subject + (String.IsNullOrWhiteSpace(queue) ? "" : " (queue: " + queue + ")"),
-            };
         }
 
         /// <summary>
@@ -65,13 +63,12 @@ namespace NATS.Client
         public Msg NextMessage(int timeout)
         {
             Connection   localConn;
-            Channel<Msg> localChannel;
             long         localMax;
             Msg          msg;
 
             lock (mu)
             {
-                if (connClosed)
+                if (conn.IsClosed)
                 {
                     throw new NATSConnectionClosedException();
                 }
@@ -83,14 +80,13 @@ namespace NATS.Client
                 {
                     throw new NATSBadSubscriptionException();
                 }
-                if (sc)
+                if (IsSlow)
                 {
-                    sc = false;
+                    IsSlow = false;
                     throw new NATSSlowConsumerException();
                 }
 
                 localConn = this.conn;
-                localChannel = this.mch;
                 localMax = this.max;
             }
 
@@ -101,13 +97,59 @@ namespace NATS.Client
 
             if (timeout >= 0)
             {
-                msg = localChannel.get(timeout);
+                msg = GetMessage(timeout);
             }
             else
             {
-                msg = localChannel.get(-1);
+                msg = GetMessage(-1);
             }
 
+            if (msg != null)
+            {
+                long d;
+                lock (mu)
+                {
+                    d = tallyDeliveredMessage(msg);
+                }
+                if (d == localMax)
+                {
+                    // Remove subscription if we have reached max.
+                    localConn.removeSubSafe(this);
+                }
+                if (localMax > 0 && d > localMax)
+                {
+                    throw new NATSMaxMessagesException();
+                }
+            }
+
+            return msg;
+        }
+
+        public async ValueTask<Msg> NextMessageAsync(CancellationToken cancellationToken = default)
+        {
+            if (conn.IsClosed)
+                throw new NATSConnectionClosedException();
+
+            if (max > 0 && delivered >= max)
+                throw new NATSMaxMessagesException();
+
+            if (closed)
+                throw new NATSBadSubscriptionException();
+
+            if (IsSlow)
+            {
+                IsSlow = false;
+                throw new NATSSlowConsumerException();
+            }
+
+            // snapshot (not necessary?)
+            var localConn = conn;
+            var localMax = max;
+
+            if (localMax > 0 && delivered >= localMax)
+                throw new NATSMaxMessagesException();
+
+            var msg = await GetMessageAsync(cancellationToken);
             if (msg != null)
             {
                 long d;

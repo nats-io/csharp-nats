@@ -1,4 +1,4 @@
-﻿// Copyright 2015-2018 The NATS Authors
+// Copyright 2015-2018 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -40,23 +40,13 @@ namespace NATS.Client
 
         private bool started = false;
 
-        internal AsyncSubscription(Connection conn, string subject, string queue)
-            : base(conn, subject, queue)
+        internal AsyncSubscription(Connection conn, long subscriptionId, string subject, string queue)
+            : base(conn, subscriptionId, subject, queue)
         {
-            mch = conn.getMessageChannel();
-            if ((ownsChannel = (mch == null)))
-            {
-                mch = new Channel<Msg>()
-                {
-                    Name = subject + (String.IsNullOrWhiteSpace(queue) ? "" : " (queue: " + queue + ")"),
-                };
-            }
         }
 
-        internal override bool processMsg(Msg msg)
+        private bool processMsg(Msg msg)
         {
-            Connection localConn;
-            EventHandler<MsgHandlerEventArgs> localHandler;
             long localMax;
             long d;
 
@@ -75,8 +65,6 @@ namespace NATS.Client
 
                 d = tallyDeliveredMessage(msg);
 
-                localConn = conn;
-                localHandler = MessageHandler;
                 localMax = max;
             }
 
@@ -84,10 +72,10 @@ namespace NATS.Client
             {
                 try
                 {
+                    var localHandler = MessageHandler;
                     if (localHandler != null)
                     {
-                        var msgHandlerEventArgs = new MsgHandlerEventArgs();
-                        msgHandlerEventArgs.msg = msg;
+                        var msgHandlerEventArgs = new MsgHandlerEventArgs(msg);
 
                         localHandler(this, msgHandlerEventArgs);
                     }
@@ -107,14 +95,9 @@ namespace NATS.Client
             return true;
         }
 
-        internal bool isStarted()
-        {
-            return started;
-        }
-
         internal void enableAsyncProcessing()
         {
-            if (ownsChannel && msgFeeder == null)
+            if (msgFeeder == null)
             {
                 // Use the default task scheduler and do not let child tasks launched
                 // when delivering messages to attach to this task (Issue #273)
@@ -122,25 +105,44 @@ namespace NATS.Client
                     doAsyncProcessing,
                     CancellationToken.None,
                     TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach,
-                    TaskScheduler.Default);
+                    TaskScheduler.Default)
+                    .Unwrap();
+
+                // ensure task has started
+                if (!SpinWait.SpinUntil(() => msgFeeder.Status == TaskStatus.Running || msgFeeder.Status == TaskStatus.WaitingForActivation, 2_000))
+                    throw new InvalidOperationException($"{nameof(AsyncSubscription)} did not start: {msgFeeder.Status}");
             }
-            started = true;
         }
 
-        private void doAsyncProcessing() => conn.deliverMsgs(mch);
+        private async Task doAsyncProcessing()
+        {
+            try
+            {
+                started = true;
+                await Task.Yield();
+                while (started)
+                {
+                    if (conn.IsClosed)
+                        return;
+
+                    var msg = await GetMessageAsync();
+                    processMsg(msg);
+                }
+            }
+            finally
+            {
+                started = false;
+            }
+        }
 
         internal void disableAsyncProcessing()
         {
-            lock (mu)
+            if (msgFeeder != null)
             {
-                if (msgFeeder != null)
-                {
-                    mch.close();
-                    msgFeeder = null;
-                }
-                MessageHandler = null;
-                started = false;
+                msgFeeder = null;
             }
+            MessageHandler = null;
+            started = false;
         }
 
         /// <summary>
@@ -158,14 +160,11 @@ namespace NATS.Client
             if (started)
                 return;
 
-            lock (mu)
-            {
-                if (conn == null)
-                    throw new NATSBadSubscriptionException();
+            if (conn == null)
+                throw new NATSBadSubscriptionException();
 
-                conn.sendSubscriptionMessage(this);
-                enableAsyncProcessing();
-            }
+            enableAsyncProcessing();
+            conn.sendSubscriptionMessage(this);
         }
 
         /// <summary>
@@ -196,10 +195,10 @@ namespace NATS.Client
             base.AutoUnsubscribe(max);
         }
 
-        internal override void close()
+        public override void Close()
         {
             disableAsyncProcessing();
-            close(ownsChannel);
+            base.Close(); // ownsChannel);
         }
     }
 }

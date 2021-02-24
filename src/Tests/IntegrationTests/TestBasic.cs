@@ -269,6 +269,34 @@ namespace IntegrationTests
         }
 
         [Fact]
+        public async Task TestSyncSubscribeAsync()
+        {
+            using (NATSServer.CreateFastAndVerify())
+            {
+                using (IConnection c = Context.OpenConnection())
+                {
+                    using (ISyncSubscription s = c.SubscribeSync("foo"))
+                    {
+                        c.Publish("foo", omsg);
+                        Msg m = await s.NextMessageAsync();
+
+                        Assert.True(compare(omsg, m), "Messages are not equal.");
+
+                        c.Publish("foo", omsg, 0, omsg.Length);
+                        m = await s.NextMessageAsync();
+
+                        Assert.True(compare(omsg, m), "Messages are not equal.");
+
+                        c.Publish("foo", omsg, 2, 3);
+                        m = await s.NextMessageAsync();
+
+                        Assert.True(compare(omsg, 2, m, 3), "Messages are not equal.");
+                    }
+                }
+            }
+        }
+
+        [Fact]
         public void TestPubWithReply()
         {
             using (NATSServer.CreateFastAndVerify())
@@ -289,6 +317,34 @@ namespace IntegrationTests
 
                         c.Publish("foo", "reply", omsg, 1, 5);
                         m = s.NextMessage(1000);
+
+                        Assert.True(compare(omsg, 1, m, 5), "Messages are not equal.");
+                    }
+                }
+            }
+        }
+
+        [Fact]
+        public async Task TestPubWithReplyAsync()
+        {
+            using (NATSServer.CreateFastAndVerify())
+            {
+                using (IConnection c = Context.OpenConnection())
+                {
+                    using (ISyncSubscription s = c.SubscribeSync("foo"))
+                    {
+                        c.Publish("foo", "reply", omsg);
+                        Msg m = await s.NextMessageAsync();
+
+                        Assert.True(compare(omsg, m), "Messages are not equal.");
+
+                        c.Publish("foo", "reply", omsg, 0, omsg.Length);
+                        m = await s.NextMessageAsync();
+
+                        Assert.True(compare(omsg, m), "Messages are not equal.");
+
+                        c.Publish("foo", "reply", omsg, 1, 5);
+                        m = await s.NextMessageAsync();
 
                         Assert.True(compare(omsg, 1, m, 5), "Messages are not equal.");
                     }
@@ -817,7 +873,8 @@ namespace IntegrationTests
                     c.SubscribeSync("timeout");
                     await Assert.ThrowsAsync<NATSTimeoutException>(() => { return c.RequestAsync("timeout", null, 500, miscToken); });
                     sw.Stop();
-                    Assert.True(sw.Elapsed.TotalMilliseconds > 500, "Elapsed millis are: " + sw.ElapsedMilliseconds);
+                    // with 5ms "wiggle room"
+                    Assert.True(sw.Elapsed.TotalMilliseconds > 495, "Elapsed millis are: " + sw.ElapsedMilliseconds);
 
                     // test early cancellation
                     var cts = new CancellationTokenSource();
