@@ -2283,10 +2283,6 @@ namespace NATS.Client
                 if (val == false)
                     return;
 
-                // Yield for a millisecond.  This reduces resource contention,
-                // increasing throughput by about 50%.
-                Thread.Sleep(1);
-
                 lock (mu)
                 {
                     if (!isConnected())
@@ -2301,6 +2297,10 @@ namespace NATS.Client
                         catch (Exception) {  /* ignore */ }
                     }
                 }
+
+                // Yield for a millisecond.  This reduces resource contention,
+                // increasing throughput by about 50%.
+                Thread.Sleep(1);
             }
         }
 
@@ -2753,7 +2753,7 @@ namespace NATS.Client
         private static bool IsNoRespondersMsg(Msg m)
         {
             return m != null && m.HasHeaders &&
-                MsgHeader.noResponders.Equals(m.Header[MsgHeader.Status]) &&
+                MsgHeader.NoResponders.Equals(m.Header[MsgHeader.Status]) &&
                 m.Data.Length == 0;
         }
 
